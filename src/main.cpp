@@ -43,20 +43,26 @@ void setup()
 
     comm->setup();
 
-    delay(2000);
+    delay(5000);
+    comm->pause_communication();
 }
 
 void loop()
 {
-    comm->handle_mqtt_loop();
     read_data();
 
     auto current_time = comm->get_localtime();
     if (current_time->tm_hour == 1 && !upload_init)
     {
+        Serial.println("Start reading data");
+        comm->resume_communication();
+        delay(5000);
+        comm->handle_mqtt_loop();
         upload_init = true;
         comm->publish("data", readFile(LittleFS, get_yesterdays_file_path().c_str()));
         checkAndCleanFileSystem(LittleFS);
+        delay(5000);
+        comm->pause_communication();
     }
     if (current_time->tm_hour == 2 && upload_init)
     {
