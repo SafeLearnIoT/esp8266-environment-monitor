@@ -44,13 +44,13 @@ void setup()
     comm->setup();
 
     delay(5000);
+
     comm->pause_communication();
 }
 
 void loop()
 {
     read_data();
-
     auto current_time = comm->get_localtime();
     if (current_time->tm_hour == 1 && !upload_init)
     {

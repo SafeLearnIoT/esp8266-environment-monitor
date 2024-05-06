@@ -12,6 +12,7 @@ inline String header = "timestamp,temperature,pressure,humidity,gas_resistance,i
 inline Bsec iaqSensor;
 inline unsigned long lastDataSaveMillis = 0;
 inline unsigned long lastDataUploadMillis = 0;
+inline unsigned long lastHealthzMillis = 0;
 
 void checkIaqSensorStatus(void);
 

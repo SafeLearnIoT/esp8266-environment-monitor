@@ -76,11 +76,17 @@ void read_data()
         {
             lastDataSaveMillis = millis();
 
+            comm->resume_communication();
+
             if (!LittleFS.exists(get_todays_file_path()))
             {
                 writeFile(LittleFS, get_todays_file_path().c_str(), header.c_str());
             }
             appendFile(LittleFS, get_todays_file_path().c_str(), output.c_str());
+
+            delay(5000);
+
+            comm->pause_communication();
         }
     }
     else
