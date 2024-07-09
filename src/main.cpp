@@ -2,17 +2,69 @@
 #define ESP8266
 #endif
 
-#include "utils.h"
+#include <Arduino.h>
+#include "bsec.h"
+#include "communication.h"
+#include "rtpnn.h"
+#include "env.h"
+
+inline String data_header = "timestamp,temperature,pressure,humidity,iaq\n";
+inline String rtpnn_header = "temperature_trend,temperature_level,pressure_trend,pressure_level,humidity_trend,humidity_level,iaq_trend,iaq_level\n";
+
+inline Bsec iaqSensor;
+inline unsigned long lastDataSaveMillis = 0;
+
+inline rTPNN::SDP<float> temperature_sdp(rTPNN::SDPType::Temperature);
+inline rTPNN::SDP<float> humidity_sdp(rTPNN::SDPType::Humidity);
+inline rTPNN::SDP<float> pressure_sdp(rTPNN::SDPType::Pressure);
+inline rTPNN::SDP<float> iaq_sdp(rTPNN::SDPType::IAQ);
+
+void callback(String &topic, String &payload)
+{
+    Serial.print("Topic: ");
+    Serial.print(topic);
+    Serial.print(", Payload: ");
+    Serial.println(payload);
+}
+
+inline auto comm = Communication::get_instance(SSID_ENV, PASSWORD_ENV, "esp8266/outside", MQTT_HOST_ENV, MQTT_PORT_ENV, callback); // esp8266/outside
+
+// Helper function definitions
+void checkIaqSensorStatus()
+{
+    String output;
+    if (iaqSensor.bsecStatus != BSEC_OK)
+    {
+        if (iaqSensor.bsecStatus < BSEC_OK)
+        {
+            output = "BSEC error code : " + String(iaqSensor.bsecStatus);
+            Serial.println(output);
+        }
+        else
+        {
+            output = "BSEC warning code : " + String(iaqSensor.bsecStatus);
+            Serial.println(output);
+        }
+    }
+
+    if (iaqSensor.bme68xStatus != BME68X_OK)
+    {
+        if (iaqSensor.bme68xStatus < BME68X_OK)
+        {
+            output = "BME68X error code : " + String(iaqSensor.bme68xStatus);
+            Serial.println(output);
+        }
+        else
+        {
+            output = "BME68X warning code : " + String(iaqSensor.bme68xStatus);
+            Serial.println(output);
+        }
+    }
+}
 
 void setup()
 {
     Serial.begin(115200);
-
-    if (!LittleFS.begin())
-    {
-        Serial.println("LittleFS Mount Failed");
-        return;
-    }
 
     delay(1000);
 
@@ -50,32 +102,58 @@ void setup()
 
 void loop()
 {
-    read_data();
-    auto current_time = comm->get_localtime();
-    if (current_time->tm_hour == 1 && !upload_init)
-    {
-        Serial.println("Start reading data");
-        comm->resume_communication();
-        delay(5000);
-        comm->handle_mqtt_loop();
-        upload_init = true;
-        comm->publish("data", readFile(LittleFS, get_yesterdays_file_path().c_str()));
-        checkAndCleanFileSystem(LittleFS);
-        delay(5000);
-        comm->pause_communication();
-    }
-    if (current_time->tm_hour == 2 && upload_init)
-    {
-        listDir(LittleFS, "/");
-        upload_init = false;
-    }
+    if (iaqSensor.run())
+    {                                              // If new data is available
+        if (millis() - lastDataSaveMillis > 60000) // 60000 - minute
+        {
+            lastDataSaveMillis = millis();
 
-    // DEBUG:
-    // if (millis() - lastDataUploadMillis > 60000) // 60000 - minute
-    // {
-    //     lastDataUploadMillis = millis();
-    //     auto out = readFile(LittleFS, get_todays_file_path().c_str());
-    //     comm->publish("data", out);
-    //     listDir(LittleFS, "/");
-    // }
+            JsonDocument sensor_data;
+            sensor_data["time"] = comm->get_rawtime();
+            sensor_data["device"] = comm->get_client_id();
+            JsonObject detail_sensor_data = sensor_data["data"].to<JsonObject>();
+            detail_sensor_data["temperature"] = iaqSensor.temperature;
+            detail_sensor_data["pressure"] = iaqSensor.pressure;
+            detail_sensor_data["humidity"] = iaqSensor.humidity;
+            if (iaqSensor.iaqAccuracy != 0)
+            {
+                detail_sensor_data["iaq"] = iaqSensor.iaq;
+            }
+            JsonDocument rtpnn_data;
+            rtpnn_data["time"] = comm->get_rawtime();
+            rtpnn_data["device"] = comm->get_client_id();
+            rtpnn_data["ml_algo"] = "rtpnn";
+            JsonObject detail_rtpnn_data = rtpnn_data["data"].to<JsonObject>();
+
+            JsonObject temperature_data = detail_rtpnn_data["temperature"].to<JsonObject>();
+            auto temperature_calc = temperature_sdp.execute_sdp(iaqSensor.temperature);
+            temperature_data["trend"] = temperature_calc.first;
+            temperature_data["level"] = temperature_calc.second;
+
+            JsonObject pressure_data = detail_rtpnn_data["pressure"].to<JsonObject>();
+            auto pressure_calc = pressure_sdp.execute_sdp(iaqSensor.pressure);
+            pressure_data["trend"] = pressure_calc.first;
+            pressure_data["level"] = pressure_calc.second;
+
+            JsonObject humidity_data = detail_rtpnn_data["humidity"].to<JsonObject>();
+            auto humidity_calc = humidity_sdp.execute_sdp(iaqSensor.humidity);
+            humidity_data["trend"] = humidity_calc.first;
+            humidity_data["level"] = humidity_calc.second;
+
+            if (iaqSensor.iaqAccuracy != 0)
+            {
+                JsonObject iaq_data = detail_rtpnn_data["iaq"].to<JsonObject>();
+                auto iaq_calc = iaq_sdp.execute_sdp(iaqSensor.iaq);
+                iaq_data["trend"] = iaq_calc.first;
+                iaq_data["level"] = iaq_calc.second;
+            }
+            JsonDocument reglin_data;
+
+            comm->send_data(sensor_data, rtpnn_data, reglin_data);
+        }
+    }
+    else
+    {
+        checkIaqSensorStatus();
+    }
 }
