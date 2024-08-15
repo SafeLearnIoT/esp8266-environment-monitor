@@ -5,19 +5,16 @@
 #include <Arduino.h>
 #include "bsec.h"
 #include "communication.h"
-#include "rtpnn.h"
+#include "ml.h"
 #include "env.h"
 
-inline String data_header = "timestamp,temperature,pressure,humidity,iaq\n";
-inline String rtpnn_header = "temperature_trend,temperature_level,pressure_trend,pressure_level,humidity_trend,humidity_level,iaq_trend,iaq_level\n";
+ML *temperature_ml;
+ML *humidity_ml;
+ML *pressure_ml;
+ML *iaq_ml;
 
-inline Bsec iaqSensor;
-inline unsigned long lastDataSaveMillis = 0;
-
-inline rTPNN::SDP<float> temperature_sdp(rTPNN::SDPType::Temperature);
-inline rTPNN::SDP<float> humidity_sdp(rTPNN::SDPType::Humidity);
-inline rTPNN::SDP<float> pressure_sdp(rTPNN::SDPType::Pressure);
-inline rTPNN::SDP<float> iaq_sdp(rTPNN::SDPType::IAQ);
+Bsec iaqSensor;
+unsigned long lastDataSaveMillis = 0;
 
 void callback(String &topic, String &payload)
 {
@@ -27,10 +24,10 @@ void callback(String &topic, String &payload)
     Serial.println(payload);
 }
 
-inline auto comm = Communication::get_instance(SSID_ENV, PASSWORD_ENV, "esp8266/outside", MQTT_HOST_ENV, MQTT_PORT_ENV, callback); // esp8266/outside
+auto comm = Communication::get_instance(SSID_ENV, PASSWORD_ENV, "esp8266/outside", MQTT_HOST_ENV, MQTT_PORT_ENV, callback); // esp8266/outside
 
 // Helper function definitions
-void checkIaqSensorStatus()
+void check_iaq_sensor_status()
 {
     String output;
     if (iaqSensor.bsecStatus != BSEC_OK)
@@ -71,7 +68,7 @@ void setup()
     iaqSensor.begin(BME68X_I2C_ADDR_LOW, Wire);
     String output = "\nBSEC library version " + String(iaqSensor.version.major) + "." + String(iaqSensor.version.minor) + "." + String(iaqSensor.version.major_bugfix) + "." + String(iaqSensor.version.minor_bugfix);
     Serial.println(output);
-    checkIaqSensorStatus();
+    check_iaq_sensor_status();
 
     bsec_virtual_sensor_t sensorList[13] = {
         BSEC_OUTPUT_IAQ,
@@ -89,7 +86,7 @@ void setup()
         BSEC_OUTPUT_GAS_PERCENTAGE};
 
     iaqSensor.updateSubscription(sensorList, 13, BSEC_SAMPLE_RATE_LP);
-    checkIaqSensorStatus();
+    check_iaq_sensor_status();
 
     delay(2000);
 
@@ -98,18 +95,45 @@ void setup()
     delay(5000);
 
     comm->pause_communication();
+
+    switch (comm->get_ml_algo())
+    {
+    case MLAlgo::LinReg:
+        temperature_ml = new Regression::Linear(SensorType::Temperature);
+        humidity_ml = new Regression::Linear(SensorType::Humidity);
+        pressure_ml = new Regression::Linear(SensorType::Pressure);
+        iaq_ml = new Regression::Linear(SensorType::IAQ);
+        break;
+    case MLAlgo::LogReg:
+        temperature_ml = new Regression::Logistic(SensorType::Temperature);
+        humidity_ml = new Regression::Logistic(SensorType::Humidity);
+        pressure_ml = new Regression::Logistic(SensorType::Pressure);
+        iaq_ml = new Regression::Logistic(SensorType::IAQ);
+        break;
+    case MLAlgo::rTPNN:
+        temperature_ml = new RTPNN::SDP(SensorType::Temperature);
+        humidity_ml = new RTPNN::SDP(SensorType::Humidity);
+        pressure_ml = new RTPNN::SDP(SensorType::Pressure);
+        iaq_ml = new RTPNN::SDP(SensorType::IAQ);
+        break;
+    case MLAlgo::None:
+        break;
+    }
 }
 
 void loop()
 {
     if (iaqSensor.run())
     {                                              // If new data is available
-        if (millis() - lastDataSaveMillis > 60000) // 60000 - minute
+        if (millis() - lastDataSaveMillis > 10000) // 60000 - minute
         {
             lastDataSaveMillis = millis();
 
+            auto raw_time = comm->get_rawtime();
+            auto time_struct = localtime(&raw_time);
+
             JsonDocument sensor_data;
-            sensor_data["time"] = comm->get_rawtime();
+            sensor_data["time"] = raw_time;
             sensor_data["device"] = comm->get_client_id();
             JsonObject detail_sensor_data = sensor_data["data"].to<JsonObject>();
             detail_sensor_data["temperature"] = iaqSensor.temperature;
@@ -119,41 +143,35 @@ void loop()
             {
                 detail_sensor_data["iaq"] = iaqSensor.iaq;
             }
-            JsonDocument rtpnn_data;
-            rtpnn_data["time"] = comm->get_rawtime();
-            rtpnn_data["device"] = comm->get_client_id();
-            rtpnn_data["ml_algo"] = "rtpnn";
-            JsonObject detail_rtpnn_data = rtpnn_data["data"].to<JsonObject>();
 
-            JsonObject temperature_data = detail_rtpnn_data["temperature"].to<JsonObject>();
-            auto temperature_calc = temperature_sdp.execute_sdp(iaqSensor.temperature);
-            temperature_data["trend"] = temperature_calc.first;
-            temperature_data["level"] = temperature_calc.second;
-
-            JsonObject pressure_data = detail_rtpnn_data["pressure"].to<JsonObject>();
-            auto pressure_calc = pressure_sdp.execute_sdp(iaqSensor.pressure);
-            pressure_data["trend"] = pressure_calc.first;
-            pressure_data["level"] = pressure_calc.second;
-
-            JsonObject humidity_data = detail_rtpnn_data["humidity"].to<JsonObject>();
-            auto humidity_calc = humidity_sdp.execute_sdp(iaqSensor.humidity);
-            humidity_data["trend"] = humidity_calc.first;
-            humidity_data["level"] = humidity_calc.second;
-
-            if (iaqSensor.iaqAccuracy != 0)
+            JsonDocument ml_data;
+            if (comm->get_ml_algo() != MLAlgo::None)
             {
-                JsonObject iaq_data = detail_rtpnn_data["iaq"].to<JsonObject>();
-                auto iaq_calc = iaq_sdp.execute_sdp(iaqSensor.iaq);
-                iaq_data["trend"] = iaq_calc.first;
-                iaq_data["level"] = iaq_calc.second;
-            }
-            JsonDocument reglin_data;
+                ml_data["time"] = raw_time;
+                ml_data["device"] = comm->get_client_id();
+                ml_data["ml_algo"] = "reglin";
+                JsonObject detail_reglin_data = ml_data["data"].to<JsonObject>();
 
-            comm->send_data(sensor_data, rtpnn_data, reglin_data);
+                JsonObject temperature_data = detail_reglin_data["temperature"].to<JsonObject>();
+                temperature_data = temperature_ml->perform(*time_struct, iaqSensor.temperature);
+
+                JsonObject pressure_data = detail_reglin_data["pressure"].to<JsonObject>();
+                pressure_data = pressure_ml->perform(*time_struct, iaqSensor.pressure);
+
+                JsonObject humidity_data = detail_reglin_data["humidity"].to<JsonObject>();
+                humidity_data = humidity_ml->perform(*time_struct, iaqSensor.humidity);
+
+                if (iaqSensor.iaqAccuracy != 0)
+                {
+                    JsonObject iaq_data = detail_reglin_data["iaq"].to<JsonObject>();
+                    iaq_data = iaq_ml->perform(*time_struct, iaqSensor.iaq);
+                }
+            }
+            comm->send_data(sensor_data, ml_data);
         }
     }
     else
     {
-        checkIaqSensorStatus();
+        check_iaq_sensor_status();
     }
 }
