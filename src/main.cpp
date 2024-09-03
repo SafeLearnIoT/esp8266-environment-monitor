@@ -153,13 +153,19 @@ void loop()
                 JsonObject detail_reglin_data = ml_data["data"].to<JsonObject>();
 
                 JsonObject temperature_data = detail_reglin_data["temperature"].to<JsonObject>();
-                temperature_data = temperature_ml->perform(*time_struct, iaqSensor.temperature);
+                auto tm_ml = temperature_ml->perform(*time_struct, iaqSensor.temperature);
+                Serial.println(typeid(tm_ml).name());
+                temperature_data = tm_ml;
 
                 JsonObject pressure_data = detail_reglin_data["pressure"].to<JsonObject>();
-                pressure_data = pressure_ml->perform(*time_struct, iaqSensor.pressure);
+                auto pr_ml = pressure_ml->perform(*time_struct, iaqSensor.pressure);
+                Serial.println(typeid(pr_ml).name());
+                pressure_data = pr_ml;
 
                 JsonObject humidity_data = detail_reglin_data["humidity"].to<JsonObject>();
-                humidity_data = humidity_ml->perform(*time_struct, iaqSensor.humidity);
+                auto hum_ml = humidity_ml->perform(*time_struct, iaqSensor.humidity);
+                Serial.println(typeid(hum_ml).name());
+                humidity_data = hum_ml;
 
                 if (iaqSensor.iaqAccuracy != 0)
                 {
