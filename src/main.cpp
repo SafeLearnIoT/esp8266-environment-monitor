@@ -8,10 +8,11 @@
 #include "ml.h"
 #include "env.h"
 
-ML *temperature_ml;
-ML *humidity_ml;
-ML *pressure_ml;
-ML *iaq_ml;
+auto ml_algo = MLAlgo::LogReg;
+auto temperature_ml = ML(Temperature, ml_algo);
+auto humidity_ml = ML(Humidity, ml_algo);
+auto pressure_ml = ML(Pressure, ml_algo);
+auto iaq_ml = ML(IAQ, ml_algo);
 
 Bsec iaqSensor;
 unsigned long lastDataSaveMillis = 0;
@@ -95,30 +96,6 @@ void setup()
     delay(5000);
 
     comm->pause_communication();
-
-    switch (comm->get_ml_algo())
-    {
-    case MLAlgo::LinReg:
-        temperature_ml = new Regression::Linear(SensorType::Temperature);
-        humidity_ml = new Regression::Linear(SensorType::Humidity);
-        pressure_ml = new Regression::Linear(SensorType::Pressure);
-        iaq_ml = new Regression::Linear(SensorType::IAQ);
-        break;
-    case MLAlgo::LogReg:
-        temperature_ml = new Regression::Logistic(SensorType::Temperature);
-        humidity_ml = new Regression::Logistic(SensorType::Humidity);
-        pressure_ml = new Regression::Logistic(SensorType::Pressure);
-        iaq_ml = new Regression::Logistic(SensorType::IAQ);
-        break;
-    case MLAlgo::rTPNN:
-        temperature_ml = new RTPNN::SDP(SensorType::Temperature);
-        humidity_ml = new RTPNN::SDP(SensorType::Humidity);
-        pressure_ml = new RTPNN::SDP(SensorType::Pressure);
-        iaq_ml = new RTPNN::SDP(SensorType::IAQ);
-        break;
-    case MLAlgo::None:
-        break;
-    }
 }
 
 void loop()
@@ -145,7 +122,7 @@ void loop()
             }
 
             JsonDocument ml_data;
-            if (comm->get_ml_algo() != MLAlgo::None)
+            if (ml_algo != MLAlgo::None)
             {
                 ml_data["time"] = raw_time;
                 ml_data["device"] = comm->get_client_id();
@@ -153,24 +130,19 @@ void loop()
                 JsonObject detail_reglin_data = ml_data["data"].to<JsonObject>();
 
                 JsonObject temperature_data = detail_reglin_data["temperature"].to<JsonObject>();
-                auto tm_ml = temperature_ml->perform(*time_struct, iaqSensor.temperature);
-                Serial.println(typeid(tm_ml).name());
-                temperature_data = tm_ml;
+                temperature_data = temperature_ml.perform(*time_struct, iaqSensor.temperature);
 
                 JsonObject pressure_data = detail_reglin_data["pressure"].to<JsonObject>();
-                auto pr_ml = pressure_ml->perform(*time_struct, iaqSensor.pressure);
-                Serial.println(typeid(pr_ml).name());
-                pressure_data = pr_ml;
+                //pressure_data = pressure_ml.perform(*time_struct, iaqSensor.pressure);
+ 
 
                 JsonObject humidity_data = detail_reglin_data["humidity"].to<JsonObject>();
-                auto hum_ml = humidity_ml->perform(*time_struct, iaqSensor.humidity);
-                Serial.println(typeid(hum_ml).name());
-                humidity_data = hum_ml;
+                //humidity_data = humidity_ml.perform(*time_struct, iaqSensor.humidity);
 
                 if (iaqSensor.iaqAccuracy != 0)
                 {
                     JsonObject iaq_data = detail_reglin_data["iaq"].to<JsonObject>();
-                    iaq_data = iaq_ml->perform(*time_struct, iaqSensor.iaq);
+                    //iaq_data = iaq_ml.perform(*time_struct, iaqSensor.iaq);
                 }
             }
             comm->send_data(sensor_data, ml_data);
