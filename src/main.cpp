@@ -8,21 +8,18 @@
 #include "ml.h"
 #include "env.h"
 
-auto ml_algo = MLAlgo::LogReg;
-auto temperature_ml = ML(Temperature, ml_algo);
-auto humidity_ml = ML(Humidity, ml_algo);
-auto pressure_ml = ML(Pressure, ml_algo);
-auto iaq_ml = ML(IAQ, ml_algo);
+auto ml_algo = MLAlgo::None;
+auto temperature_ml = ML(Temperature, ml_algo, "temperature");
+auto humidity_ml = ML(Humidity, ml_algo, "humidity");
+auto pressure_ml = ML(Pressure, ml_algo, "pressure");
+auto iaq_ml = ML(IAQ, ml_algo, "iaq");
 
 Bsec iaqSensor;
 unsigned long lastDataSaveMillis = 0;
 
 void callback(String &topic, String &payload)
 {
-    Serial.print("Topic: ");
-    Serial.print(topic);
-    Serial.print(", Payload: ");
-    Serial.println(payload);
+    Serial.println("[SUB][" + topic + "] " + payload);
 }
 
 auto comm = Communication::get_instance(SSID_ENV, PASSWORD_ENV, "esp8266/outside", MQTT_HOST_ENV, MQTT_PORT_ENV, callback); // esp8266/outside
@@ -100,17 +97,19 @@ void setup()
 
 void loop()
 {
+    comm->handle_mqtt_loop();
     if (iaqSensor.run())
     {                                              // If new data is available
-        if (millis() - lastDataSaveMillis > 10000) // 60000 - minute
+        if (millis() - lastDataSaveMillis > 30000) // 60000 - minute; 900000 - 15 minutes
         {
+            comm->resume_communication();
             lastDataSaveMillis = millis();
 
             auto raw_time = comm->get_rawtime();
             auto time_struct = localtime(&raw_time);
 
             JsonDocument sensor_data;
-            sensor_data["time"] = raw_time;
+            sensor_data["time_sent"] = raw_time;
             sensor_data["device"] = comm->get_client_id();
             JsonObject detail_sensor_data = sensor_data["data"].to<JsonObject>();
             detail_sensor_data["temperature"] = iaqSensor.temperature;
@@ -124,28 +123,21 @@ void loop()
             JsonDocument ml_data;
             if (ml_algo != MLAlgo::None)
             {
-                ml_data["time"] = raw_time;
+                ml_data["time_sent"] = raw_time;
                 ml_data["device"] = comm->get_client_id();
-                ml_data["ml_algo"] = "reglin";
-                JsonObject detail_reglin_data = ml_data["data"].to<JsonObject>();
+                ml_data["ml_algo"] = algoString[ml_algo];
+                JsonObject data = ml_data["data"].to<JsonObject>();
 
-                JsonObject temperature_data = detail_reglin_data["temperature"].to<JsonObject>();
-                temperature_data = temperature_ml.perform(*time_struct, iaqSensor.temperature);
-
-                JsonObject pressure_data = detail_reglin_data["pressure"].to<JsonObject>();
-                //pressure_data = pressure_ml.perform(*time_struct, iaqSensor.pressure);
- 
-
-                JsonObject humidity_data = detail_reglin_data["humidity"].to<JsonObject>();
-                //humidity_data = humidity_ml.perform(*time_struct, iaqSensor.humidity);
+                temperature_ml.perform(*time_struct, iaqSensor.temperature, data);
+                pressure_ml.perform(*time_struct, iaqSensor.pressure, data);
+                humidity_ml.perform(*time_struct, iaqSensor.humidity, data);
 
                 if (iaqSensor.iaqAccuracy != 0)
                 {
-                    JsonObject iaq_data = detail_reglin_data["iaq"].to<JsonObject>();
-                    //iaq_data = iaq_ml.perform(*time_struct, iaqSensor.iaq);
+                    iaq_ml.perform(*time_struct, iaqSensor.iaq, data);
                 }
             }
-            comm->send_data(sensor_data, ml_data);
+            // comm->send_data(sensor_data, ml_data);
         }
     }
     else
