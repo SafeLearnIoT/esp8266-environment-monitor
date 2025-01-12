@@ -8,21 +8,35 @@
 #include "ml.h"
 #include "env.h"
 
-auto ml_algo = MLAlgo::None;
-auto temperature_ml = ML(Temperature, ml_algo, "temperature");
-auto humidity_ml = ML(Humidity, ml_algo, "humidity");
-auto pressure_ml = ML(Pressure, ml_algo, "pressure");
-auto iaq_ml = ML(IAQ, ml_algo, "iaq");
+auto temperature_ml = ML(Temperature, "temperature");
+auto humidity_ml = ML(Humidity, "humidity");
+auto pressure_ml = ML(Pressure, "pressure");
+auto iaq_ml = ML(IAQ, "iaq");
 
 Bsec iaqSensor;
 unsigned long lastDataSaveMillis = 0;
 
+void callback(String &topic, String &payload);
+
+auto comm = Communication::get_instance(SSID_ENV, PASSWORD_ENV, "esp8266/outside", MQTT_HOST_ENV, MQTT_PORT_ENV, callback); // esp8266/outside
+
 void callback(String &topic, String &payload)
 {
     Serial.println("[SUB][" + topic + "] " + payload);
+    if(payload == "get_weights")
+    {
+        comm->hold_connection();
+        comm->publish("cmd", "", true);
+        auto weights = temperature_ml.get_weights();
+        serializeJson(weights, Serial);
+        Serial.println();
+    }
+    if(payload=="set_weights")
+    {
+        comm->release_connection();
+    }
 }
 
-auto comm = Communication::get_instance(SSID_ENV, PASSWORD_ENV, "esp8266/outside", MQTT_HOST_ENV, MQTT_PORT_ENV, callback); // esp8266/outside
 
 // Helper function definitions
 void check_iaq_sensor_status()
@@ -89,10 +103,6 @@ void setup()
     delay(2000);
 
     comm->setup();
-
-    delay(5000);
-
-    comm->pause_communication();
 }
 
 void loop()
@@ -100,14 +110,12 @@ void loop()
     comm->handle_mqtt_loop();
     if (iaqSensor.run())
     {                                              // If new data is available
-        if (millis() - lastDataSaveMillis > 30000) // 60000 - minute; 900000 - 15 minutes
+        if (millis() - lastDataSaveMillis > 10000) // 60000 - minute; 900000 - 15 minutes
         {
             comm->resume_communication();
             lastDataSaveMillis = millis();
 
             auto raw_time = comm->get_rawtime();
-            auto time_struct = localtime(&raw_time);
-
             JsonDocument sensor_data;
             sensor_data["time_sent"] = raw_time;
             sensor_data["device"] = comm->get_client_id();
@@ -120,24 +128,18 @@ void loop()
                 detail_sensor_data["iaq"] = iaqSensor.iaq;
             }
 
-            JsonDocument ml_data;
-            if (ml_algo != MLAlgo::None)
+            temperature_ml.perform(iaqSensor.temperature);
+            pressure_ml.perform(iaqSensor.pressure);
+            humidity_ml.perform(iaqSensor.humidity);
+
+            if (iaqSensor.iaqAccuracy != 0)
             {
-                ml_data["time_sent"] = raw_time;
-                ml_data["device"] = comm->get_client_id();
-                ml_data["ml_algo"] = algoString[ml_algo];
-                JsonObject data = ml_data["data"].to<JsonObject>();
-
-                temperature_ml.perform(*time_struct, iaqSensor.temperature, data);
-                pressure_ml.perform(*time_struct, iaqSensor.pressure, data);
-                humidity_ml.perform(*time_struct, iaqSensor.humidity, data);
-
-                if (iaqSensor.iaqAccuracy != 0)
-                {
-                    iaq_ml.perform(*time_struct, iaqSensor.iaq, data);
-                }
+                iaq_ml.perform(iaqSensor.iaq);
             }
-            // comm->send_data(sensor_data, ml_data);
+            serializeJson(sensor_data, Serial);
+            Serial.println();
+  
+            comm->send_data(sensor_data);
         }
     }
     else
