@@ -5,6 +5,7 @@
 #include <Arduino.h>
 #include "bsec.h"
 #include "communication.h"
+#include "jsonToArray.h"
 #include "ml.h"
 #include "env.h"
 
@@ -20,20 +21,25 @@ void callback(String &topic, String &payload);
 
 auto comm = Communication::get_instance(SSID_ENV, PASSWORD_ENV, "esp8266/outside", MQTT_HOST_ENV, MQTT_PORT_ENV, callback); // esp8266/outside
 
+bool get_weights = false;
+bool set_weights = false;
+String payload_content;
+
 void callback(String &topic, String &payload)
 {
     Serial.println("[SUB][" + topic + "] " + payload);
     if(payload == "get_weights")
     {
-        comm->hold_connection();
-        comm->publish("cmd", "", true);
-        auto weights = temperature_ml.get_weights();
-        serializeJson(weights, Serial);
-        Serial.println();
+        if(!get_weights){
+            get_weights = true;
+        }
     }
-    if(payload=="set_weights")
+    if(payload.startsWith("set_weights;"))
     {
-        comm->release_connection();
+       if(!set_weights){
+           payload_content = payload;
+           set_weights = true;
+       }
     }
 }
 
@@ -103,14 +109,65 @@ void setup()
     delay(2000);
 
     comm->setup();
+    
+    delay(5000);
 }
 
 void loop()
 {
+    if(get_weights)
+    {
+        comm->hold_connection();
+
+        JsonDocument doc;
+        temperature_ml.get_weights(doc);
+        humidity_ml.get_weights(doc);
+        pressure_ml.get_weights(doc);
+        iaq_ml.get_weights(doc);
+        comm->publish("cmd_mcu", "weights;" + doc.as<String>());
+        get_weights = false;
+    }
+    if(set_weights)
+    {   
+        JsonDocument doc;
+        if(payload_content.substring(12)=="ok"){
+            comm->publish("cmd_gateway", "", true);
+            comm->release_connection();
+            payload_content.clear();
+            set_weights = false;
+            return;
+        }
+        deserializeJson(doc, payload_content.substring(12));
+        
+        auto temperature_weights = Converter<std::array<double, 4>>::fromJson(doc["temperature"]);
+        Serial.print("[Temperature]");
+        temperature_ml.set_weights(temperature_weights);
+
+        auto humidity_weights = Converter<std::array<double, 4>>::fromJson(doc["humidity"]);
+        Serial.print("[Humidity]");
+        humidity_ml.set_weights(humidity_weights);
+
+        auto pressure_weights = Converter<std::array<double, 4>>::fromJson(doc["pressure"]);
+        Serial.print("[Pressure]");
+        pressure_ml.set_weights(pressure_weights);
+
+        auto iaq_weights = Converter<std::array<double, 4>>::fromJson(doc["iaq"]);
+        Serial.print("[IAQ]");
+        iaq_ml.set_weights(iaq_weights);
+        
+        // Clear message
+        comm->publish("cmd_gateway", "", true);
+
+        comm->release_connection();
+        payload_content.clear();
+        set_weights = false;
+    }
+
     comm->handle_mqtt_loop();
+
     if (iaqSensor.run())
     {                                              // If new data is available
-        if (millis() - lastDataSaveMillis > 10000) // 60000 - minute; 900000 - 15 minutes
+        if (millis() - lastDataSaveMillis > 900000) // 60000 - minute; 900000 - 15 minutes
         {
             comm->resume_communication();
             lastDataSaveMillis = millis();
@@ -128,18 +185,30 @@ void loop()
                 detail_sensor_data["iaq"] = iaqSensor.iaq;
             }
 
-            temperature_ml.perform(iaqSensor.temperature);
-            pressure_ml.perform(iaqSensor.pressure);
-            humidity_ml.perform(iaqSensor.humidity);
+            JsonDocument ml_data;
+            ml_data["time_sent"] = raw_time;
+            ml_data["device"] = comm->get_client_id();
+            JsonObject detail_ml_data = ml_data["data"].to<JsonObject>();
+
+            JsonObject temperature_data = detail_ml_data["temperature"].to<JsonObject>();
+            JsonObject pressure_data = detail_ml_data["pressure"].to<JsonObject>();
+            JsonObject humidity_data = detail_ml_data["humidity"].to<JsonObject>();
+
+            temperature_ml.perform(iaqSensor.temperature, temperature_data);
+            pressure_ml.perform(iaqSensor.pressure, pressure_data);
+            humidity_ml.perform(iaqSensor.humidity, humidity_data);
 
             if (iaqSensor.iaqAccuracy != 0)
             {
-                iaq_ml.perform(iaqSensor.iaq);
+                JsonObject iaq_data = detail_ml_data["iaq"].to<JsonObject>();
+                iaq_ml.perform(iaqSensor.iaq, iaq_data);
             }
-            serializeJson(sensor_data, Serial);
-            Serial.println();
+            //serializeJson(sensor_data, Serial);
+            //Serial.println();
   
-            comm->send_data(sensor_data);
+            //comm->send_data(sensor_data);
+            serializeJson(ml_data, Serial);
+            comm->send_ml(ml_data);
         }
     }
     else
